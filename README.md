@@ -1,1 +1,1 @@
-# ProyectoComputoParalelo
+# ProyectoComputoParalelo.
