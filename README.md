@@ -74,7 +74,7 @@ jupyter notebook 02_prediccion_LST_paralelo.ipynb
 Ejecutar todas las celdas en orden. Las tablas quedan en `resultados/` y las figuras en `figuras/`.
 
 <details>
-<summary>⚙️ <b>Parámetros que se pueden cambiar</b></summary>
+<summary> <b>Parámetros que se pueden cambiar</b></summary>
 
 | Parámetro | Dónde | Por defecto | Para qué |
 |---|---|---|---|
