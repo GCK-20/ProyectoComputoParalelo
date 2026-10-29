@@ -1,0 +1,3 @@
+reparto,procesos,tiempo_s,speedup
+Estático (nivelar),8,327.8440187000001,2.9852848085527683
+Dinámico (imap_unordered),8,225.63059520000024,4.337655395237813
