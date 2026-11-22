@@ -102,8 +102,10 @@ def variables_bloque(filas):
     return df
 
 
-def construir_variables(mapas, procesos=1):
-    """Construye la tabla completa. Regresa (DataFrame, segundos)."""
+def construir_variables_v1(mapas, procesos=1):
+    """Versión del 2º avance (un DataFrame por fila y mes, se regresa cada bloque
+    al proceso principal). Se conserva solo para comparar tiempos.
+    Regresa (DataFrame, segundos)."""
     filas = list(range(mapas[2].shape[0]))
     t0 = time.perf_counter()
     if procesos == 1:
@@ -113,6 +115,148 @@ def construir_variables(mapas, procesos=1):
         bloques = nivelar(filas, procesos)
         with mp.Pool(procesos, initializer=inicializar_mapas, initargs=mapas) as pool:
             df = pd.concat(pool.map(variables_bloque, bloques), ignore_index=True)
+    return df, time.perf_counter() - t0
+
+
+# ----------------------------------------------------------------------
+# Versión 2: numpy vectorizado + memoria compartida
+#
+# Problema de la v1: cada proceso recibía una copia de los mapas (≈80 MB) y
+# regresaba su bloque de la tabla serializado (pickle); unir los bloques en el
+# proceso principal costaba más que armarlos, por eso 8 procesos eran más
+# lentos que 1.
+#
+# En la v2 los mapas y la tabla de salida viven en memoria compartida
+# (multiprocessing.shared_memory); los procesos solo reciben índices.
+#   Fase 1: cada proceso cuenta cuántos registros válidos tiene su bloque.
+#   Suma prefija (proceso principal): posición donde escribe cada bloque.
+#   Fase 2: cada proceso escribe sus registros directamente en la tabla.
+# Así ningún proceso copia ni regresa datos grandes.
+# ----------------------------------------------------------------------
+from multiprocessing import shared_memory
+
+COLUMNAS_TABLA = ["fila", "col", "anio", "mes", "LST", "LST_t1", "LST_t2",
+                  "LST_t3", "LST_t12", "NDVI_t1", "ALTITUD", "lat", "lon",
+                  "mes_sin", "mes_cos"]
+_COMP = {}          # arreglos en memoria compartida de cada proceso
+
+
+def _crear_compartido(arreglo=None, forma=None, tipo="float64"):
+    """Copia `arreglo` a memoria compartida, o reserva un arreglo vacío de `forma`."""
+    if arreglo is not None:
+        forma, tipo = arreglo.shape, arreglo.dtype
+    tipo = np.dtype(tipo)
+    shm = shared_memory.SharedMemory(create=True, size=max(int(np.prod(forma)) * tipo.itemsize, 1))
+    if arreglo is not None:
+        np.ndarray(forma, dtype=tipo, buffer=shm.buf)[...] = arreglo
+    return shm, (shm.name, tuple(forma), tipo.str)
+
+
+def _abrir_compartido(desc):
+    nombre, forma, tipo = desc
+    shm = shared_memory.SharedMemory(name=nombre)
+    return shm, np.ndarray(forma, dtype=np.dtype(tipo), buffer=shm.buf)
+
+
+def _inicializar_v2(desc_lst, desc_ndvi, desc_alt, lat, lon):
+    for clave, desc in (("lst", desc_lst), ("ndvi", desc_ndvi), ("alt", desc_alt)):
+        shm, arr = _abrir_compartido(desc)
+        _COMP[clave] = arr
+        _COMP["shm_" + clave] = shm          # se guarda para que no se libere
+    _COMP["lat"], _COMP["lon"] = lat, lon
+
+
+def _mascara_bloque(f0, f1):
+    """Registros válidos (sin nubes) del bloque de filas [f0, f1).
+    Forma (filas, meses, columnas): el orden es fila -> mes -> columna,
+    igual que en la v1, para que la tabla sea idéntica."""
+    lst, ndvi, alt = _COMP["lst"][:, f0:f1], _COMP["ndvi"][:, f0:f1], _COMP["alt"][f0:f1]
+    r0 = max(RETRASOS)
+    ok = np.isfinite(lst[r0:])
+    for k in RETRASOS:
+        ok &= np.isfinite(lst[r0 - k:lst.shape[0] - k])
+    ok &= np.isfinite(ndvi[r0 - 1:-1])
+    ok &= np.isfinite(alt)[None]
+    return ok.transpose(1, 0, 2)
+
+
+def _contar_bloque(bloque):
+    f0, f1 = bloque
+    return int(_mascara_bloque(f0, f1).sum())
+
+
+def _escribir_bloque(args):
+    (f0, f1), inicio, desc_salida = args
+    if "salida" not in _COMP:              # el proceso abre la tabla una sola vez
+        shm, arr = _abrir_compartido(desc_salida)
+        _COMP["salida"], _COMP["shm_salida"] = arr, shm
+    lst, ndvi, alt = _COMP["lst"], _COMP["ndvi"], _COMP["alt"]
+    ok = _mascara_bloque(f0, f1)
+    rr, tt, cc = np.nonzero(ok)            # índices relativos al bloque
+    r = rr + f0
+    t = tt + max(RETRASOS)                 # mes absoluto (0 = enero 2015)
+    mes = t % 12 + 1
+    columnas = [r, cc, ANIO_INICIO + t // 12, mes, lst[t, r, cc],
+                lst[t - 1, r, cc], lst[t - 2, r, cc], lst[t - 3, r, cc],
+                lst[t - 12, r, cc], ndvi[t - 1, r, cc], alt[r, cc],
+                _COMP["lat"][r], _COMP["lon"][cc],
+                np.sin(2 * np.pi * mes / 12), np.cos(2 * np.pi * mes / 12)]
+    salida = _COMP["salida"]
+    for j, valores in enumerate(columnas):
+        salida[inicio:inicio + len(r), j] = valores
+    return len(r)
+
+
+def construir_variables(mapas, procesos=1):
+    """Construye la tabla completa (v2). Regresa (DataFrame, segundos).
+    El tiempo incluye crear la memoria compartida y armar el DataFrame."""
+    lst, ndvi, alt, lat, lon = mapas
+    t0 = time.perf_counter()
+    shms = []
+    try:
+        shm_l, d_l = _crear_compartido(np.ascontiguousarray(lst, dtype="float32"))
+        shm_n, d_n = _crear_compartido(np.ascontiguousarray(ndvi, dtype="float32"))
+        shm_a, d_a = _crear_compartido(np.ascontiguousarray(alt, dtype="float32"))
+        shms += [shm_l, shm_n, shm_a]
+        lat64, lon64 = np.asarray(lat, "float64"), np.asarray(lon, "float64")
+        bloques = [(b[0], b[-1] + 1) for b in nivelar(list(range(alt.shape[0])), procesos) if b]
+
+        def suma_prefija(conteos):
+            inicios = np.concatenate([[0], np.cumsum(conteos)[:-1]]).astype(int)
+            return inicios.tolist(), int(sum(conteos))
+
+        if procesos == 1:
+            _inicializar_v2(d_l, d_n, d_a, lat64, lon64)
+            conteos = [_contar_bloque(b) for b in bloques]              # fase 1
+            inicios, n_total = suma_prefija(conteos)
+            shm_s, d_s = _crear_compartido(forma=(n_total, len(COLUMNAS_TABLA)))
+            shms.append(shm_s)
+            escritos = [_escribir_bloque((b, i, d_s)) for b, i in zip(bloques, inicios)]  # fase 2
+        else:
+            # Un solo Pool para las dos fases (crear procesos en Windows es caro)
+            with mp.Pool(procesos, initializer=_inicializar_v2,
+                         initargs=(d_l, d_n, d_a, lat64, lon64)) as pool:
+                conteos = pool.map(_contar_bloque, bloques, chunksize=1)   # fase 1
+                inicios, n_total = suma_prefija(conteos)
+                shm_s, d_s = _crear_compartido(forma=(n_total, len(COLUMNAS_TABLA)))
+                shms.append(shm_s)
+                escritos = pool.map(_escribir_bloque,                      # fase 2
+                                    [(b, i, d_s) for b, i in zip(bloques, inicios)], chunksize=1)
+        assert escritos == conteos
+
+        tabla = np.ndarray((n_total, len(COLUMNAS_TABLA)), dtype="float64", buffer=shm_s.buf)
+        df = pd.DataFrame(tabla.copy(), columns=COLUMNAS_TABLA)
+        for c in ("fila", "col", "anio", "mes"):
+            df[c] = df[c].astype("int32")
+        for c in COLUMNAS_TABLA[4:11]:
+            df[c] = df[c].astype("float32")
+    finally:
+        for clave in [k for k in _COMP if k.startswith("shm_")]:
+            _COMP[clave].close()
+        _COMP.clear()
+        for s in shms:
+            s.close()
+            s.unlink()
     return df, time.perf_counter() - t0
 
 
