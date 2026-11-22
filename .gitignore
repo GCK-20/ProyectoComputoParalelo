@@ -1,0 +1,10 @@
+# Los mapas de MODIS pesan ~32 MB: se descargan con 01_descarga_MODIS_GEE.js
+*.tif
+*.tiff
+
+# Python y Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.venv/
