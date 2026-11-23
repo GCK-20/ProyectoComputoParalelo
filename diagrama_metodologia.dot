@@ -1,0 +1,30 @@
+// Diagrama de la metodología (tercer avance)
+// Generar la imagen:  dot -Tpng -Gdpi=200 diagrama_metodologia.dot -o figuras/diagrama_metodologia.png
+digraph metodologia {
+  rankdir=TB; newrank=true;
+  graph [fontname="Helvetica", fontsize=11, nodesep=0.5, ranksep=0.4, bgcolor="white",
+         label="Azul: etapas paralelizadas con multiprocessing", labelloc=b, fontcolor="#5b6b7f", fontsize=9];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10,
+         fillcolor="#f2f5f9", color="#5b6b7f", penwidth=1.2, margin="0.15,0.08"];
+  edge  [color="#5b6b7f", arrowsize=0.7];
+
+  datos   [label="1. Datos\nMODIS LST y NDVI mensual\nSRTM altitud · 2015–2024\n(Google Earth Engine)"];
+  tabla   [label="2. Construcción de la tabla\n4.4 M registros pixel-mes\nmemoria compartida:\nconteo → suma prefija → escritura",
+           fillcolor="#e3eefb", color="#2a78d6"];
+  part    [label="3. Partición temporal\nentrenamiento y validación 2016–2023\nprueba: 12 mapas de 2024"];
+  busq    [label="4. Búsqueda de hiperparámetros\n46 combinaciones KNN · RF · SVR\nreparto estático vs. dinámico",
+           fillcolor="#e3eefb", color="#2a78d6"];
+  pred    [label="5. Predicción de 2024\npixeles en bloques\nun proceso por bloque",
+           fillcolor="#e3eefb", color="#2a78d6"];
+  eval    [label="6. Evaluación\nRMSE · MAE · R² por mes\nvs. persistencia y climatología\nspeedup · eficiencia · Karp–Flatt"];
+
+  // Dos filas: 1 -> 2 -> 3 arriba; 4 -> 5 -> 6 abajo
+  { rank=same; datos; tabla; part; }
+  { rank=same; busq; pred; eval; }
+  datos -> tabla -> part;
+  part -> busq [constraint=true];
+  busq -> pred -> eval;
+  datos -> busq [style=invis];
+  tabla -> pred [style=invis];
+  part  -> eval [style=invis];
+}
